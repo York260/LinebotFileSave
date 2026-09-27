@@ -17,8 +17,6 @@ from linebot.v3.messaging import (
     Configuration,
     MessagingApi,
     MessagingApiBlob,
-    ReplyMessageRequest,
-    TextMessage,
 )
 from linebot.v3.webhooks import (
     AudioMessageContent,
@@ -182,7 +180,9 @@ def timestamp() -> str:
 
 
 def handle_media_backup(event, mime_type, label, extension=None, filename_override=None):
-    """共用邏輯：下載媒體訊息內容、依來源分資料夾備份到 Google Drive、回覆結果。"""
+    """共用邏輯：下載媒體訊息內容、依來源分資料夾備份到 Google Drive。
+    不管成功或失敗都不回覆任何訊息（純背景備份，失敗原因看伺服器日誌）。
+    """
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         blob_api = MessagingApiBlob(api_client)
@@ -194,14 +194,8 @@ def handle_media_backup(event, mime_type, label, extension=None, filename_overri
         folder_id = get_or_create_subfolder(source_name) or GOOGLE_DRIVE_FOLDER_ID
 
         ok = folder_id is not None and backup_to_drive(content, filename, mime_type, folder_id)
-        reply_text = "收到，感謝~" if ok else f"{label}備份失敗，請稍後再試"
-
-        line_bot_api.reply_message_with_http_info(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text=reply_text)],
-            )
-        )
+        if not ok:
+            print(f"{label}備份失敗: message_id={event.message.id}")
 
 
 @app.route("/")
