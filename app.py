@@ -90,14 +90,14 @@ else:
     )
 
 
-def backup_to_drive(content: bytes, filename: str, mime_type: str) -> bool:
+def backup_to_drive(content: bytes, filename: str, mime_type: str, parent_folder_id: str) -> bool:
     """把檔案內容上傳到指定的 Google Drive 資料夾備份，回傳是否成功。"""
     if _drive_service is None:
         return False
     try:
         media = MediaIoBaseUpload(io.BytesIO(content), mimetype=mime_type)
         _drive_service.files().create(
-            body={"name": filename, "parents": [GOOGLE_DRIVE_FOLDER_ID]},
+            body={"name": filename, "parents": [parent_folder_id]},
             media_body=media,
             fields="id",
         ).execute()
@@ -108,7 +108,7 @@ def backup_to_drive(content: bytes, filename: str, mime_type: str) -> bool:
 
 
 def source_label(source) -> str:
-    """依訊息來源（私訊／群組／多人聊天室）產生檔名用的識別字串。"""
+    """依訊息來源（私訊／群組／多人聊天室）產生識別字串，抓不到名稱時的備用值。"""
     if source.type == "group":
         return f"group_{source.group_id}"
     if source.type == "room":
@@ -116,22 +116,84 @@ def source_label(source) -> str:
     return f"user_{source.user_id}"
 
 
+def resolve_source_name(event, line_bot_api) -> str:
+    """取得訊息來源的人類可讀名稱（群組名稱／使用者暱稱），當成子資料夾名稱。
+    查不到名稱（例如 API 失敗）就退回用 ID，仍能正常分資料夾，只是名稱較不好認。
+    """
+    source = event.source
+    try:
+        if source.type == "group":
+            summary = line_bot_api.get_group_summary(source.group_id)
+            name = f"群組-{summary.group_name}"
+        elif source.type == "room":
+            # 多人聊天室沒有名稱可查，只能用 ID
+            name = f"多人聊天室-{source.room_id}"
+        else:
+            profile = line_bot_api.get_profile(source.user_id)
+            name = f"私訊-{profile.display_name}"
+    except Exception as exc:  # noqa: BLE001
+        print(f"取得來源名稱失敗，改用 ID: {exc}")
+        name = source_label(source)
+
+    # Drive 資料夾名稱不能有斜線，避免顯示上跟路徑搞混
+    return name.replace("/", "／")
+
+
+_folder_id_cache: dict[str, str] = {}
+
+
+def get_or_create_subfolder(name: str) -> str | None:
+    """在備份資料夾底下取得（沒有就建立）指定名稱的子資料夾，回傳其 ID。"""
+    if _drive_service is None:
+        return None
+    if name in _folder_id_cache:
+        return _folder_id_cache[name]
+
+    escaped_name = name.replace("\\", "\\\\").replace("'", "\\'")
+    query = (
+        f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and name = '{escaped_name}' "
+        "and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+    )
+    try:
+        results = _drive_service.files().list(q=query, fields="files(id)").execute()
+        files = results.get("files", [])
+        if files:
+            folder_id = files[0]["id"]
+        else:
+            folder = _drive_service.files().create(
+                body={
+                    "name": name,
+                    "mimeType": "application/vnd.google-apps.folder",
+                    "parents": [GOOGLE_DRIVE_FOLDER_ID],
+                },
+                fields="id",
+            ).execute()
+            folder_id = folder["id"]
+    except Exception as exc:  # noqa: BLE001
+        print(f"建立/取得子資料夾失敗: {exc}")
+        return None
+
+    _folder_id_cache[name] = folder_id
+    return folder_id
+
+
 def timestamp() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
 def handle_media_backup(event, mime_type, label, extension=None, filename_override=None):
-    """共用邏輯：下載媒體訊息內容、備份到 Google Drive、回覆結果。"""
+    """共用邏輯：下載媒體訊息內容、依來源分資料夾備份到 Google Drive、回覆結果。"""
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         blob_api = MessagingApiBlob(api_client)
 
         content = blob_api.get_message_content(event.message.id)
-        filename = filename_override or (
-            f"{timestamp()}_{source_label(event.source)}_{event.message.id}.{extension}"
-        )
+        filename = filename_override or f"{timestamp()}_{event.message.id}.{extension}"
 
-        ok = backup_to_drive(content, filename, mime_type)
+        source_name = resolve_source_name(event, line_bot_api)
+        folder_id = get_or_create_subfolder(source_name) or GOOGLE_DRIVE_FOLDER_ID
+
+        ok = folder_id is not None and backup_to_drive(content, filename, mime_type, folder_id)
         reply_text = "收到，感謝~" if ok else f"{label}備份失敗，請稍後再試"
 
         line_bot_api.reply_message_with_http_info(
