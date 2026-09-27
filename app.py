@@ -1,9 +1,15 @@
+import io
+import json
+import mimetypes
 import os
-import tempfile
+from datetime import datetime
 
-import speech_recognition as sr
 from dotenv import load_dotenv
 from flask import Flask, abort, request
+from google.auth.transport.requests import Request as GoogleAuthRequest
+from google.oauth2.credentials import Credentials as GoogleUserCredentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
@@ -14,8 +20,13 @@ from linebot.v3.messaging import (
     ReplyMessageRequest,
     TextMessage,
 )
-from linebot.v3.webhooks import AudioMessageContent, MessageEvent, TextMessageContent
-from pydub import AudioSegment
+from linebot.v3.webhooks import (
+    AudioMessageContent,
+    FileMessageContent,
+    ImageMessageContent,
+    MessageEvent,
+    VideoMessageContent,
+)
 
 load_dotenv()
 
@@ -24,10 +35,116 @@ app = Flask(__name__)
 configuration = Configuration(access_token=os.environ["LINE_CHANNEL_ACCESS_TOKEN"])
 handler = WebhookHandler(os.environ["LINE_CHANNEL_SECRET"])
 
+# --- Google Drive 備份設定 ---
+# 服務帳戶沒有儲存空間配額，個人（非 Workspace）帳號沒辦法讓它建立檔案，
+# 所以改用 OAuth 使用者授權：檔案的擁有者是你自己的帳號，算在你自己的容量裡。
+# 授權是一次性的，本機執行 google_auth_setup.py 完成登入後會產生 token；
+# refresh_token 本身不會過期，之後都是自動續期，不需要再次登入。
+#
+# token 的來源有兩種（擇一即可）：
+#   1. GOOGLE_OAUTH_TOKEN_JSON：把 google-token.json 的完整內容當成環境變數。
+#      給雲端平台用（例如 Render）——那種平台的檔案系統重啟後不會保留，
+#      所以不能只存在本機檔案裡。
+#   2. GOOGLE_OAUTH_TOKEN_FILE：本機檔案路徑，本機開發用。
+GOOGLE_OAUTH_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+GOOGLE_OAUTH_TOKEN_JSON = os.environ.get("GOOGLE_OAUTH_TOKEN_JSON")
+GOOGLE_OAUTH_TOKEN_FILE = os.environ.get("GOOGLE_OAUTH_TOKEN_FILE", "google-token.json")
+GOOGLE_DRIVE_FOLDER_ID = os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
+
+
+def _load_drive_credentials():
+    if not GOOGLE_DRIVE_FOLDER_ID:
+        return None
+
+    if GOOGLE_OAUTH_TOKEN_JSON:
+        creds = GoogleUserCredentials.from_authorized_user_info(
+            json.loads(GOOGLE_OAUTH_TOKEN_JSON), scopes=GOOGLE_OAUTH_SCOPES
+        )
+    elif os.path.exists(GOOGLE_OAUTH_TOKEN_FILE):
+        creds = GoogleUserCredentials.from_authorized_user_file(
+            GOOGLE_OAUTH_TOKEN_FILE, scopes=GOOGLE_OAUTH_SCOPES
+        )
+    else:
+        return None
+
+    if creds.expired and creds.refresh_token:
+        creds.refresh(GoogleAuthRequest())
+        # 只有本機檔案模式才寫回去；環境變數模式下一次啟動會重新用
+        # refresh_token 換新的 access token，不需要（也無法持久）寫回。
+        if not GOOGLE_OAUTH_TOKEN_JSON:
+            with open(GOOGLE_OAUTH_TOKEN_FILE, "w", encoding="utf-8") as f:
+                f.write(creds.to_json())
+    return creds
+
+
+_drive_credentials = _load_drive_credentials()
+if _drive_credentials:
+    _drive_service = build(
+        "drive", "v3", credentials=_drive_credentials, cache_discovery=False
+    )
+else:
+    _drive_service = None
+    print(
+        "尚未完成 Google Drive OAuth 授權或缺少 GOOGLE_DRIVE_FOLDER_ID，"
+        "雲端備份功能已停用（請先執行 google_auth_setup.py）"
+    )
+
+
+def backup_to_drive(content: bytes, filename: str, mime_type: str) -> bool:
+    """把檔案內容上傳到指定的 Google Drive 資料夾備份，回傳是否成功。"""
+    if _drive_service is None:
+        return False
+    try:
+        media = MediaIoBaseUpload(io.BytesIO(content), mimetype=mime_type)
+        _drive_service.files().create(
+            body={"name": filename, "parents": [GOOGLE_DRIVE_FOLDER_ID]},
+            media_body=media,
+            fields="id",
+        ).execute()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print(f"上傳 Google Drive 失敗: {exc}")
+        return False
+
+
+def source_label(source) -> str:
+    """依訊息來源（私訊／群組／多人聊天室）產生檔名用的識別字串。"""
+    if source.type == "group":
+        return f"group_{source.group_id}"
+    if source.type == "room":
+        return f"room_{source.room_id}"
+    return f"user_{source.user_id}"
+
+
+def timestamp() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def handle_media_backup(event, mime_type, label, extension=None, filename_override=None):
+    """共用邏輯：下載媒體訊息內容、備份到 Google Drive、回覆結果。"""
+    with ApiClient(configuration) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        blob_api = MessagingApiBlob(api_client)
+
+        content = blob_api.get_message_content(event.message.id)
+        filename = filename_override or (
+            f"{timestamp()}_{source_label(event.source)}_{event.message.id}.{extension}"
+        )
+
+        ok = backup_to_drive(content, filename, mime_type)
+        reply_text = "收到，感謝~" if ok else f"{label}備份失敗，請稍後再試"
+
+        line_bot_api.reply_message_with_http_info(
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=[TextMessage(text=reply_text)],
+            )
+        )
+
 
 @app.route("/")
 def home():
-    return "eco bot running"
+    return "backup bot running"
 
 
 @app.route("/webhook", methods=["POST"])
@@ -43,58 +160,26 @@ def webhook():
     return "OK"
 
 
-@handler.add(MessageEvent, message=TextMessageContent)
-def handle_message(event):
-    with ApiClient(configuration) as api_client:
-        line_bot_api = MessagingApi(api_client)
-        line_bot_api.reply_message_with_http_info(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text=event.message.text)],
-            )
-        )
+@handler.add(MessageEvent, message=ImageMessageContent)
+def handle_image(event):
+    handle_media_backup(event, mime_type="image/jpeg", label="圖片", extension="jpg")
+
+
+@handler.add(MessageEvent, message=VideoMessageContent)
+def handle_video(event):
+    handle_media_backup(event, mime_type="video/mp4", label="影片", extension="mp4")
 
 
 @handler.add(MessageEvent, message=AudioMessageContent)
 def handle_audio(event):
-    with ApiClient(configuration) as api_client:
-        line_bot_api = MessagingApi(api_client)
-        blob_api = MessagingApiBlob(api_client)
+    handle_media_backup(event, mime_type="audio/mp4", label="語音", extension="m4a")
 
-        # 下載語音檔
-        audio_content = blob_api.get_message_content(event.message.id)
 
-        # 存成暫存 m4a，轉成 wav
-        with tempfile.NamedTemporaryFile(suffix=".m4a", delete=False) as f:
-            f.write(audio_content)
-            temp_m4a = f.name
-
-        temp_wav = temp_m4a.replace(".m4a", ".wav")
-        AudioSegment.from_file(temp_m4a, format="m4a").export(temp_wav, format="wav")
-
-        # 語音辨識
-        recognizer = sr.Recognizer()
-        with sr.AudioFile(temp_wav) as source:
-            audio_data = recognizer.record(source)
-
-        try:
-            text = recognizer.recognize_google(audio_data, language="zh-TW")
-        except sr.UnknownValueError:
-            text = "無法辨識語音內容"
-        except sr.RequestError:
-            text = "語音辨識服務發生錯誤"
-
-        # 清理暫存檔
-        os.unlink(temp_m4a)
-        os.unlink(temp_wav)
-
-        # 回傳辨識結果
-        line_bot_api.reply_message_with_http_info(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text=text)],
-            )
-        )
+@handler.add(MessageEvent, message=FileMessageContent)
+def handle_file(event):
+    filename = event.message.file_name
+    mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    handle_media_backup(event, mime_type=mime_type, label="檔案", filename_override=filename)
 
 
 if __name__ == "__main__":

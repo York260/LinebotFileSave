@@ -11,3 +11,8 @@ wheels/
 
 # Environment variables
 .env
+
+# Google 憑證與授權 token（機密，不可進版控）
+*service-account*.json
+google-oauth-client.json
+google-token.json

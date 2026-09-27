@@ -6,8 +6,10 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "flask>=3.1.2",
+    "google-api-python-client>=2.200.0",
+    "google-auth>=2.58.1",
+    "google-auth-oauthlib>=1.4.1",
+    "gunicorn>=26.2.0",
     "line-bot-sdk>=3.22.0",
-    "pydub>=0.25.1",
     "python-dotenv>=1.2.1",
-    "speechrecognition>=3.14.5",
 ]

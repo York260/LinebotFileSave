@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: line-bot-backup
+    runtime: python
+    plan: free
+    buildCommand: pip install uv && uv sync --frozen --no-dev
+    startCommand: uv run gunicorn app:app --bind 0.0.0.0:$PORT
+    envVars:
+      - key: LINE_CHANNEL_SECRET
+        sync: false
+      - key: LINE_CHANNEL_ACCESS_TOKEN
+        sync: false
+      - key: GOOGLE_DRIVE_FOLDER_ID
+        sync: false
+      - key: GOOGLE_OAUTH_TOKEN_JSON
+        sync: false
