@@ -141,7 +141,12 @@ _folder_id_cache: dict[str, str] = {}
 
 
 def get_or_create_subfolder(name: str) -> str | None:
-    """在備份資料夾底下取得（沒有就建立）指定名稱的子資料夾，回傳其 ID。"""
+    """取得（沒有就在備份資料夾底下建立）指定名稱的子資料夾，回傳其 ID。
+
+    不限定子資料夾一定要在備份資料夾底下：使用者可能把它搬到別的資料夾共用。
+    drive.file 權限只看得到 bot 自己建立的檔案，所以不會抓到使用者其他同名資料夾；
+    若有重複，取最早建立的那個。
+    """
     if _drive_service is None:
         return None
     if name in _folder_id_cache:
@@ -149,11 +154,13 @@ def get_or_create_subfolder(name: str) -> str | None:
 
     escaped_name = name.replace("\\", "\\\\").replace("'", "\\'")
     query = (
-        f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and name = '{escaped_name}' "
+        f"name = '{escaped_name}' "
         "and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
     )
     try:
-        results = _drive_service.files().list(q=query, fields="files(id)").execute()
+        results = _drive_service.files().list(
+            q=query, fields="files(id)", orderBy="createdTime"
+        ).execute()
         files = results.get("files", [])
         if files:
             folder_id = files[0]["id"]
