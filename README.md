@@ -33,7 +33,7 @@ uv run python app.py
    - `LINE_CHANNEL_ACCESS_TOKEN`
    - `GOOGLE_DRIVE_FOLDER_ID`
    - `GOOGLE_OAUTH_TOKEN_JSON`：把本機 `google-token.json` 的**完整檔案內容**貼進去（單行 JSON 字串）。雲端環境的檔案系統不持久，不能只存本機檔案，所以改用環境變數保存
-4. 部署完成後，Render 會給一個永久網址（例如 `https://line-bot-backup.onrender.com`）
+4. 部署完成後，Render 會給一個永久網址（例如 `https://line-bot-backup-ytcp.onrender.com`）
 5. 到 LINE Developers 後台，把 Webhook URL 改成 `https://<你的網址>/webhook`，並確認「Use webhook」是打開的
 
 免費方案閒置一段時間會睡眠，收到訊息時幾秒內會自動喚醒，對這種低流量的個人 bot 完全夠用。

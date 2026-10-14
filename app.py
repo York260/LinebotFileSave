@@ -233,6 +233,21 @@ def privacy():
 """
 
 
+@app.route("/terms")
+def terms():
+    return """<!doctype html>
+<meta charset="utf-8">
+<title>服務條款</title>
+<h1>服務條款</h1>
+<p>本 LINE Bot 為擁有者自用的檔案備份工具，不對外提供服務。</p>
+<ul>
+  <li>本服務按現況提供，不保證備份一定成功或不中斷。</li>
+  <li>使用者應自行確認傳送的檔案內容合法，且有權備份。</li>
+  <li>擁有者可隨時修改或停止本服務。</li>
+</ul>
+"""
+
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     signature = request.headers["X-Line-Signature"]
