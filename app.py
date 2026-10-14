@@ -2,6 +2,7 @@ import io
 import json
 import mimetypes
 import os
+import sys
 from datetime import datetime
 
 from dotenv import load_dotenv
@@ -28,6 +29,10 @@ from linebot.v3.webhooks import (
 )
 
 load_dotenv()
+
+# 雲端平台（例如 Render）上 stdout 不是終端機，print 會被整塊緩衝，
+# 錯誤訊息要等程式結束才出現在日誌、甚至看不到；改成每行立刻輸出。
+sys.stdout.reconfigure(line_buffering=True)
 
 app = Flask(__name__)
 
