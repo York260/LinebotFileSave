@@ -210,6 +210,22 @@ def home():
     return "backup bot running"
 
 
+# Google OAuth 同意畫面切換成正式版時，必須提供隱私權政策網址
+@app.route("/privacy")
+def privacy():
+    return """<!doctype html>
+<meta charset="utf-8">
+<title>隱私權政策</title>
+<h1>隱私權政策</h1>
+<p>本 LINE Bot 僅供擁有者個人使用，用途是將 LINE 聊天中收到的檔案備份到擁有者自己的 Google Drive。</p>
+<ul>
+  <li>Google Drive 權限僅限 drive.file，只能存取本 Bot 自己建立的檔案與資料夾。</li>
+  <li>收到的檔案只會上傳到擁有者的 Google Drive，不會保存在伺服器上，也不會分享給任何第三方。</li>
+  <li>不收集、不販售任何個人資料。</li>
+</ul>
+"""
+
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     signature = request.headers["X-Line-Signature"]
