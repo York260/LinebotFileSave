@@ -6,6 +6,7 @@ from datetime import datetime
 
 from dotenv import load_dotenv
 from flask import Flask, abort, request
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2.credentials import Credentials as GoogleUserCredentials
 from googleapiclient.discovery import build
@@ -75,31 +76,73 @@ def _load_drive_credentials():
     return creds
 
 
-_drive_credentials = _load_drive_credentials()
-if _drive_credentials:
-    _drive_service = build(
-        "drive", "v3", credentials=_drive_credentials, cache_discovery=False
-    )
-else:
+_drive_service = None
+_drive_error: str | None = None  # 最近一次無法使用 Drive 的原因，首頁會顯示
+
+
+def _set_drive_error(message: str) -> None:
+    global _drive_service, _drive_error
     _drive_service = None
-    print(
-        "尚未完成 Google Drive OAuth 授權或缺少 GOOGLE_DRIVE_FOLDER_ID，"
-        "雲端備份功能已停用（請先執行 google_auth_setup.py）"
+    _drive_error = message
+    print(message)
+
+
+def _set_auth_expired(exc: Exception) -> None:
+    _set_drive_error(
+        f"Google Drive 授權失效，雲端備份暫停（{exc}）。"
+        "請重新執行 google_auth_setup.py，並更新 GOOGLE_OAUTH_TOKEN_JSON"
     )
+
+
+def get_drive_service():
+    """取得 Drive API client，還沒成功初始化就再試一次。
+
+    授權失敗（例如 refresh token 過期，invalid_grant）時不讓整個 app 掛掉，
+    否則 webhook 跟首頁都會整個打不開，很難看出原因。
+    失敗原因會印在日誌、顯示在首頁，之後每次要備份時都會重試。
+    """
+    global _drive_service, _drive_error
+    if _drive_service is not None:
+        return _drive_service
+
+    try:
+        creds = _load_drive_credentials()
+    except Exception as exc:  # noqa: BLE001
+        _set_auth_expired(exc)
+        return None
+    if creds is None:
+        _set_drive_error(
+            "尚未完成 Google Drive OAuth 授權或缺少 GOOGLE_DRIVE_FOLDER_ID，"
+            "雲端備份功能已停用（請先執行 google_auth_setup.py）"
+        )
+        return None
+
+    _drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
+    _drive_error = None
+    return _drive_service
+
+
+# 啟動時先試一次，授權有問題馬上就會在日誌看到
+get_drive_service()
 
 
 def backup_to_drive(content: bytes, filename: str, mime_type: str, parent_folder_id: str) -> bool:
     """把檔案內容上傳到指定的 Google Drive 資料夾備份，回傳是否成功。"""
-    if _drive_service is None:
+    drive_service = get_drive_service()
+    if drive_service is None:
         return False
     try:
         media = MediaIoBaseUpload(io.BytesIO(content), mimetype=mime_type)
-        _drive_service.files().create(
+        drive_service.files().create(
             body={"name": filename, "parents": [parent_folder_id]},
             media_body=media,
             fields="id",
         ).execute()
         return True
+    except RefreshError as exc:
+        # 執行中 refresh token 失效：清掉 client，讓首頁顯示原因、下次重新載入授權
+        _set_auth_expired(exc)
+        return False
     except Exception as exc:  # noqa: BLE001
         print(f"上傳 Google Drive 失敗: {exc}")
         return False
@@ -147,7 +190,8 @@ def get_or_create_subfolder(name: str) -> str | None:
     drive.file 權限只看得到 bot 自己建立的檔案，所以不會抓到使用者其他同名資料夾；
     若有重複，取最早建立的那個。
     """
-    if _drive_service is None:
+    drive_service = get_drive_service()
+    if drive_service is None:
         return None
     if name in _folder_id_cache:
         return _folder_id_cache[name]
@@ -158,14 +202,14 @@ def get_or_create_subfolder(name: str) -> str | None:
         "and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
     )
     try:
-        results = _drive_service.files().list(
+        results = drive_service.files().list(
             q=query, fields="files(id)", orderBy="createdTime"
         ).execute()
         files = results.get("files", [])
         if files:
             folder_id = files[0]["id"]
         else:
-            folder = _drive_service.files().create(
+            folder = drive_service.files().create(
                 body={
                     "name": name,
                     "mimeType": "application/vnd.google-apps.folder",
@@ -190,6 +234,10 @@ def handle_media_backup(event, mime_type, label, extension=None, filename_overri
     """共用邏輯：下載媒體訊息內容、依來源分資料夾備份到 Google Drive。
     不管成功或失敗都不回覆任何訊息（純背景備份，失敗原因看伺服器日誌）。
     """
+    if get_drive_service() is None:
+        print(f"{label}備份失敗（Google Drive 無法使用）: message_id={event.message.id}")
+        return
+
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         blob_api = MessagingApiBlob(api_client)
@@ -207,7 +255,10 @@ def handle_media_backup(event, mime_type, label, extension=None, filename_overri
 
 @app.route("/")
 def home():
-    return "backup bot running"
+    # 打開網址就能確認備份是否正常，不用翻伺服器日誌
+    if get_drive_service() is None:
+        return f"backup bot running，但 Google Drive 備份目前無法使用：{_drive_error}"
+    return "backup bot running，Google Drive 備份正常"
 
 
 @app.route("/webhook", methods=["POST"])
