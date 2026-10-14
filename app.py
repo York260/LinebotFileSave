@@ -6,6 +6,7 @@ from datetime import datetime
 
 from dotenv import load_dotenv
 from flask import Flask, abort, request
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2.credentials import Credentials as GoogleUserCredentials
 from googleapiclient.discovery import build
@@ -37,7 +38,8 @@ handler = WebhookHandler(os.environ["LINE_CHANNEL_SECRET"])
 # 服務帳戶沒有儲存空間配額，個人（非 Workspace）帳號沒辦法讓它建立檔案，
 # 所以改用 OAuth 使用者授權：檔案的擁有者是你自己的帳號，算在你自己的容量裡。
 # 授權是一次性的，本機執行 google_auth_setup.py 完成登入後會產生 token；
-# refresh_token 本身不會過期，之後都是自動續期，不需要再次登入。
+# OAuth 同意畫面必須是「正式版」，refresh_token 才不會過期；
+# 若停在「測試中」，refresh_token 7 天後就會失效，需要重新授權。
 #
 # token 的來源有兩種（擇一即可）：
 #   1. GOOGLE_OAUTH_TOKEN_JSON：把 google-token.json 的完整內容當成環境變數。
@@ -66,7 +68,12 @@ def _load_drive_credentials():
         return None
 
     if creds.expired and creds.refresh_token:
-        creds.refresh(GoogleAuthRequest())
+        try:
+            creds.refresh(GoogleAuthRequest())
+        except RefreshError as e:
+            # token 失效時不要讓整個服務崩潰（/privacy 等頁面仍需可用）
+            print(f"Google Drive token 已失效，請重新執行 google_auth_setup.py: {e}")
+            return None
         # 只有本機檔案模式才寫回去；環境變數模式下一次啟動會重新用
         # refresh_token 換新的 access token，不需要（也無法持久）寫回。
         if not GOOGLE_OAUTH_TOKEN_JSON:
